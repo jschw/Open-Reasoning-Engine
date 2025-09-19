@@ -1,21 +1,33 @@
 from typing import Optional, Dict, List
 import textwrap
 from openai import OpenAI
+import json
+import time
 
 # Initialize OpenAI client (requires OPENAI_API_KEY in environment)
 client = OpenAI(base_url="http://localhost:4000/v1",
                 api_key="NONE",)
 
-def generate(messages: List[Dict[str, str]], max_tokens: int = 200, model: str = "gpt-4.1-mini") -> str:
+def generate(messages: List[Dict[str, str]], temp: float = 0.3, max_tokens: int = 200) -> str:
     """
     Generate text using the OpenAI API with a full conversation context.
     """
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=0.3,
-    )
+    if max_tokens is not None:
+        conf = {
+            "model":"gpt-4.1",
+            "messages":messages,
+            "temperature":temp,
+            }
+    else:
+        conf = {
+            "model":"gpt-4.1",
+            "messages":messages,
+            "max_tokens":max_tokens,
+            "temperature":temp,
+            }
+
+    response = client.chat.completions.create(**conf)
+
     return response.choices[0].message.content.strip()
 
 
@@ -25,9 +37,8 @@ class ReasoningWrapper:
     Returns a dict compatible with OpenAI API responses, plus
     `reasoning_history` and `feedback_reports`.
     """
-    def __init__(self, model: str = "gpt-4.1-mini", hidden_token_limit: int = 200, reasoning_depth: int = 3):
+    def __init__(self, model: str = "gpt-4.1-mini", reasoning_depth: int = 3):
         self.model = model
-        self.hidden_token_limit = hidden_token_limit
         self.reasoning_depth = reasoning_depth
 
     def _split_context_and_request(self, messages: List[Dict[str, str]]) -> tuple[List[Dict[str, str]], str]:
@@ -71,7 +82,7 @@ class ReasoningWrapper:
             {"role": "user", "content": reasoning_instructions}
         ]
 
-        return generate(reasoning_messages, max_tokens=self.hidden_token_limit, model=self.model)
+        return generate(reasoning_messages)
 
     def _generate_answer(self, context: List[Dict[str, str]], user_request: str, hidden_reasoning: str, visible_token_limit: int = 100) -> str:
         answer_instructions = (
@@ -83,13 +94,14 @@ class ReasoningWrapper:
         answer_messages = context + [
             {"role": "user", "content": answer_instructions},
         ]
-        return generate(answer_messages, max_tokens=visible_token_limit, model=self.model)
+        return generate(answer_messages, max_tokens=visible_token_limit)
 
     def _check_answer(self, context: List[Dict[str, str]], user_request: str, reasoning: str, answer: str) -> tuple[bool, str]:
         """
         Use the model to check if the answer satisfies reasoning requirements.
         Returns a feedback report with [[ACCEPTED]] or [[REVISE]].
         """
+
         verification_prompt = f"""
                                 [CHECK ANSWER TASK]
                                 Conversation context:
@@ -110,16 +122,16 @@ class ReasoningWrapper:
                                 - If all requirements are satisfied, write a short report and end with [[ACCEPTED]].
                                 - If not, explain what is missing and end with [[REVISE]].
                                 """
+
         check_messages = context + [{"role": "user", "content": verification_prompt}]
-        feedback_report = generate(check_messages, max_tokens=500, model=self.model)
+        feedback_report = generate(check_messages)
 
         if "[[ACCEPTED]]" in feedback_report:
             return True, feedback_report
         else:
             return False, feedback_report
 
-    def answer(self, messages: List[Dict[str, str]], hidden_token_budget: Optional[int] = None, visible_token_budget: int = 100) -> Dict:
-        hidden_token_budget = hidden_token_budget or self.hidden_token_limit
+    def answer(self, messages: List[Dict[str, str]], visible_token_budget: int = 100) -> Dict:
         reasoning_history = []
         feedback_reports = []
         answer = None
@@ -157,7 +169,7 @@ class ReasoningWrapper:
         response = {
             "id": "chatcmpl-wrapper-001",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": int(time.time()),
             "model": self.model,
             "choices": [
                 {
@@ -184,24 +196,27 @@ class ReasoningWrapper:
 
 # === Example usage ===
 if __name__ == "__main__":
-    wrapper = ReasoningWrapper(model="gpt-4.1-mini", hidden_token_limit=1000, reasoning_depth=3)
+    wrapper = ReasoningWrapper(model="gpt-4.1-mini", reasoning_depth=3)
 
-    '''conversation = [
+    conversation = [
         {"role": "user", "content": "Hi, can you help me with a math question?"},
         {"role": "assistant", "content": "Of course! What’s the problem?"},
         {"role": "user", "content": "Which is the largest prime number under 20?"}
-    ]'''
+    ]
 
     '''conversation = [
         {"role": "user", "content": "Which is the largest prime number under 22?"}
     ]'''
 
-    conversation = [
-        {"role": "user", "content": "Write a python script that calculates the value of Pi. The script should be structured as class with some parameters for the desired precision of Pi and then stops the iteration if the desired precision is reached."}
-    ]
+    '''conversation = [
+        {"role": "user", "content": "Write a python script that outputs random numbers as fancy images."}
+    ]'''
 
-    result = wrapper.answer(conversation, visible_token_budget=1500)
+    '''conversation = [
+        {"role": "user", "content": "Write a python script that generates a funny image and displays it."}
+    ]'''
+
+    result = wrapper.answer(conversation, visible_token_budget=None)
 
     print("=== API-LIKE OUTPUT ===")
-    import json
     print(json.dumps(result, indent=2))
